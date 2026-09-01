@@ -13,7 +13,10 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 BASE_URL = "http://localhost:8080"
 CALLBACK_URL = "http://callback-mock:9000/callback"
@@ -463,7 +466,7 @@ def main() -> int:
         if not r.passed:
             all_pass = False
 
-    report_path = "/Users/ayush/Documents/high-throughput-inference/BENCHMARK.md"
+    report_path = REPO_ROOT / "BENCHMARK.md"
     with open(report_path, "w") as f:
         f.write("# Benchmark & Validation Report\n\n")
         f.write(f"Generated: {datetime.now(timezone.utc).isoformat()}\n\n")

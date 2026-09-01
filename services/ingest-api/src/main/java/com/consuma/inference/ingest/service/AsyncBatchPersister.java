@@ -40,5 +40,6 @@ public class AsyncBatchPersister {
         for (InferenceRequestEvent event : events) {
             kafkaTemplate.send(KafkaTopics.INFERENCE_REQUESTS, event.model(), event);
         }
+        kafkaTemplate.flush();
     }
 }

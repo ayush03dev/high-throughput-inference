@@ -11,11 +11,11 @@
     <name>high-throughput-inference</name>
 
     <modules>
-        <module>services/common</module>
-        <module>services/provider-simulator</module>
-        <module>services/ingest-api</module>
-        <module>services/scheduler-worker</module>
-        <module>services/callback-worker</module>
+        <module>services/shared</module>
+        <module>services/provider-mock</module>
+        <module>services/inference-gateway</module>
+        <module>services/request-processor</module>
+        <module>services/webhook-delivery</module>
     </modules>
 
     <properties>
@@ -36,7 +36,7 @@
             </dependency>
             <dependency>
                 <groupId>com.consuma.inference</groupId>
-                <artifactId>common</artifactId>
+                <artifactId>shared</artifactId>
                 <version>${project.version}</version>
             </dependency>
         </dependencies>

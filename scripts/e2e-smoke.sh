@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BASE_URL="${BASE_URL:-http://localhost:8080}"
-CALLBACK_URL="${CALLBACK_URL:-http://callback-mock:9000/callback}"
+CALLBACK_URL="${CALLBACK_URL:-http://webhook-mock:9000/callback}"
 
 echo "==> E2E smoke test against ${BASE_URL}"
 
@@ -21,8 +21,8 @@ wait_for() {
   return 1
 }
 
-wait_for "${BASE_URL}/actuator/health" "ingest-api"
-wait_for "http://localhost:9000/health" "callback-mock"
+wait_for "${BASE_URL}/actuator/health" "inference-gateway"
+wait_for "http://localhost:9000/health" "webhook-mock"
 
 REQ_ID="e2e-req-$(date +%s)"
 echo "==> Submit single request ${REQ_ID}"

@@ -1,20 +1,20 @@
 # High-Throughput Inference Gateway
 
-Production-style inference gateway: **Java microservices + Kafka + PostgreSQL + Redis**, with **Node.js** load and callback tools. Single monorepo.
+Production-style inference gateway: **Java microservices + Kafka + PostgreSQL + Redis**, with **Node.js** load and webhook test tools. Single monorepo.
 
 ## Project layout
 
 ```
 high-throughput-inference/
 ├── services/
-│   ├── common/              # shared Java library (entities, rate limiter, Kafka events)
-│   ├── ingest-api/          # HTTP API
-│   ├── scheduler-worker/    # Kafka consumer + rate limits + provider calls
-│   ├── callback-worker/     # batch webhook delivery
-│   └── provider-simulator/  # fake LLM HTTP API
+│   ├── shared/              # shared Java library (entities, rate limiter, Kafka events)
+│   ├── inference-gateway/   # HTTP API
+│   ├── request-processor/   # Kafka consumer + rate limits + provider calls
+│   ├── webhook-delivery/    # batch webhook delivery
+│   └── provider-mock/       # fake LLM HTTP API
 ├── tools/
 │   ├── loadgen/             # load generator CLI
-│   └── callback-mock/       # webhook receiver for tests
+│   └── webhook-mock/        # test webhook receiver (simulates client callback URL)
 ├── scenarios/               # validation scripts
 ├── scripts/                 # smoke tests, helpers
 ├── docker-compose.yml
@@ -23,11 +23,11 @@ high-throughput-inference/
 
 ## Architecture
 
-- **ingest-api** — accept requests/batches, persist, publish to Kafka
-- **scheduler-worker** — consume Kafka, enforce RPM/TPM (Redis), call provider
-- **provider-simulator** — fake LLM HTTP API
-- **callback-worker** — deliver batch webhooks with retries
-- **loadgen** / **callback-mock** — Node.js tooling (under `tools/`)
+- **inference-gateway** — accept requests/batches, persist, publish to Kafka
+- **request-processor** — consume Kafka, enforce RPM/TPM (Redis), call provider
+- **provider-mock** — fake LLM HTTP API
+- **webhook-delivery** — deliver batch webhooks with retries
+- **loadgen** / **webhook-mock** — Node.js tooling (under `tools/`)
 
 See [DESIGN.md](DESIGN.md) for full architecture.
 
@@ -36,7 +36,7 @@ See [DESIGN.md](DESIGN.md) for full architecture.
 - Java 21+
 - Maven 3.9+
 - Docker Desktop
-- Node.js 20+ (for loadgen / callback-mock)
+- Node.js 20+ (for loadgen / webhook-mock)
 
 ## Quick start
 
@@ -73,11 +73,11 @@ node index.js --url http://localhost:8080 --rate 100 --duration 10 --models mode
 
 | Service | Port |
 |---------|------|
-| ingest-api | 8080 |
-| scheduler-worker | 8081 |
-| provider-simulator | 8082 |
-| callback-worker | 8083 |
-| callback-mock | 9000 |
+| inference-gateway | 8080 |
+| request-processor | 8081 |
+| provider-mock | 8082 |
+| webhook-delivery | 8083 |
+| webhook-mock | 9000 |
 | Postgres | 5432 |
 | Redis | 6379 |
 | Kafka | 9092 |

@@ -19,7 +19,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 BASE_URL = "http://localhost:8080"
-CALLBACK_URL = "http://callback-mock:9000/callback"
+CALLBACK_URL = "http://webhook-mock:9000/callback"
 TOKENS_PER_REQUEST = 1000
 PG_CONTAINER = "high-throughput-inference-postgres-1"
 
@@ -202,7 +202,144 @@ def wait_for_completions(prefix: str, expected: int, timeout_sec: int = 600) -> 
     return states
 
 
-def scenario1() -> ScenarioResult:
+def percentile(values: list[float], p: float) -> float:
+    if not values:
+        return 0.0
+    sorted_values = sorted(values)
+    rank = (len(sorted_values) - 1) * (p / 100.0)
+    low = int(rank)
+    high = min(low + 1, len(sorted_values) - 1)
+    weight = rank - low
+    return sorted_values[low] + (sorted_values[high] - sorted_values[low]) * weight
+
+
+def latency_percentiles_ms(since_epoch: float | None = None, batch_id: str | None = None, prefix: str | None = None) -> dict[str, float]:
+    clauses = ["completed_at IS NOT NULL"]
+    if since_epoch is not None:
+        since = datetime.fromtimestamp(since_epoch, tz=timezone.utc).isoformat()
+        clauses.append(f"submitted_at >= '{since}'")
+    if batch_id is not None:
+        clauses.append(f"batch_id = '{batch_id}'")
+    if prefix is not None:
+        clauses.append(f"request_id LIKE '{prefix}%'")
+    where = " AND ".join(clauses)
+    rows = psql(
+        f"SELECT extract(epoch from (completed_at - submitted_at)) * 1000 "
+        f"FROM requests WHERE {where}"
+    )
+    latencies = [float(line) for line in rows.splitlines() if line.strip()]
+    return {
+        "p50_ms": round(percentile(latencies, 50), 1),
+        "p95_ms": round(percentile(latencies, 95), 1),
+        "p99_ms": round(percentile(latencies, 99), 1),
+        "samples": len(latencies),
+    }
+
+
+def request_counts(since_epoch: float | None = None, batch_id: str | None = None, prefix: str | None = None) -> dict[str, int]:
+    clauses = ["TRUE"]
+    if since_epoch is not None:
+        since = datetime.fromtimestamp(since_epoch, tz=timezone.utc).isoformat()
+        clauses.append(f"submitted_at >= '{since}'")
+    if batch_id is not None:
+        clauses.append(f"batch_id = '{batch_id}'")
+    if prefix is not None:
+        clauses.append(f"request_id LIKE '{prefix}%'")
+    where = " AND ".join(clauses)
+    rows = psql(f"SELECT state, count(*) FROM requests WHERE {where} GROUP BY state")
+    states: dict[str, int] = {}
+    for line in rows.splitlines():
+        if "|" in line:
+            state, count = line.split("|")
+            states[state] = int(count)
+    submitted = sum(states.values())
+    succeeded = states.get("SUCCEEDED", 0)
+    failed = states.get("FAILED", 0)
+    expired = states.get("EXPIRED", 0)
+    completed = succeeded + failed + expired
+    return {
+        "submitted": submitted,
+        "completed": completed,
+        "successful": succeeded,
+        "failed": failed,
+        "expired": expired,
+        "queued": states.get("QUEUED", 0),
+        "in_flight": states.get("IN_FLIGHT", 0),
+        "completion_rate_pct": round((completed / submitted * 100.0) if submitted else 0.0, 2),
+    }
+
+
+def observed_limits_per_model(
+    completions: list[tuple[float, str, int]],
+    configured: dict[str, dict[str, int]],
+) -> dict[str, dict[str, Any]]:
+    observed: dict[str, dict[str, Any]] = {}
+    for model, limits in configured.items():
+        events = [(ts, tok) for ts, m, tok in completions if m == model]
+        ts_list = [ts for ts, _ in events]
+        observed[model] = {
+            "configured_rpm": limits["rpm"],
+            "configured_tpm": limits["tpm"],
+            "observed_max_rpm_60s": max_in_sliding_window(ts_list, 60),
+            "observed_max_tpm_60s": max_tpm_sliding_window(events, 60),
+            "completed_requests": len(events),
+        }
+    return observed
+
+
+def write_benchmark_report(results: list[ScenarioResult]) -> None:
+    report_path = REPO_ROOT / "BENCHMARK.md"
+    with open(report_path, "w") as f:
+        f.write("# Benchmark & Validation Report\n\n")
+        f.write(f"Generated: {datetime.now(timezone.utc).isoformat()}\n\n")
+        f.write("## Environment\n\n")
+        f.write("- Docker Compose stack on local machine\n")
+        f.write("- Java 21 microservices + Kafka + Postgres + Redis\n\n")
+        f.write("## Scenario Results\n\n")
+        for r in results:
+            f.write(f"### {r.name}: {'PASS' if r.passed else 'FAIL'}\n\n")
+            summary = r.details.get("summary")
+            if summary:
+                f.write("#### Run summary\n\n")
+                f.write("| Metric | Value |\n")
+                f.write("|--------|-------|\n")
+                for key, value in summary.items():
+                    f.write(f"| {key} | {value} |\n")
+                f.write("\n")
+            latency = r.details.get("latency_ms")
+            if latency:
+                f.write("#### Latency (submit → complete)\n\n")
+                f.write("| Percentile | ms |\n")
+                f.write("|------------|-----|\n")
+                f.write(f"| p50 | {latency['p50_ms']} |\n")
+                f.write(f"| p95 | {latency['p95_ms']} |\n")
+                f.write(f"| p99 | {latency['p99_ms']} |\n")
+                f.write(f"| samples | {latency['samples']} |\n\n")
+            limits = r.details.get("limits_per_model")
+            if limits:
+                f.write("#### Configured vs observed limits (per model)\n\n")
+                f.write("| Model | Config RPM | Observed max RPM (60s) | Config TPM | Observed max TPM (60s) | Completed |\n")
+                f.write("|-------|------------|------------------------|------------|-------------------------|----------|\n")
+                for model, stats in limits.items():
+                    f.write(
+                        f"| {model} | {stats['configured_rpm']:,} | {stats['observed_max_rpm_60s']:,} "
+                        f"| {stats['configured_tpm']:,} | {stats['observed_max_tpm_60s']:,} "
+                        f"| {stats['completed_requests']:,} |\n"
+                    )
+                f.write("\n")
+            timing = r.details.get("timing")
+            if timing:
+                f.write("#### Batch / callback timing\n\n")
+                f.write("| Milestone | ms |\n")
+                f.write("|-----------|-----|\n")
+                for key, value in timing.items():
+                    f.write(f"| {key} | {value} |\n")
+                f.write("\n")
+            f.write("<details>\n<summary>Full JSON details</summary>\n\n")
+            f.write("```json\n")
+            f.write(json.dumps(r.details, indent=2))
+            f.write("\n```\n\n</details>\n\n")
+
     print("\n" + "=" * 60)
     print("SCENARIO 1: Reach provider capacity (50K RPM / 100M TPM)")
     print("=" * 60)
@@ -248,6 +385,19 @@ def scenario1() -> ScenarioResult:
     )
 
     details = {
+        "summary": {
+            "submitted": submitted,
+            "completed": total_terminal,
+            "successful": states.get("SUCCEEDED", 0),
+            "failed": states.get("FAILED", 0),
+            "expired": states.get("EXPIRED", 0),
+            "completion_rate_pct": round((total_terminal / submitted * 100.0) if submitted else 0.0, 2),
+        },
+        "latency_ms": latency_percentiles_ms(since_epoch=start),
+        "limits_per_model": observed_limits_per_model(
+            completions,
+            {"model-a": {"rpm": 50_000, "tpm": 100_000_000}},
+        ),
         "submitted": submitted,
         "states": states,
         "max_rpm_60s_window": max_rpm,
@@ -330,6 +480,26 @@ def scenario2() -> ScenarioResult:
     )
 
     details = {
+        "summary": {
+            "submitted": submitted_a + submitted_b,
+            "completed": a_stats["total_completed"] + b_stats["total_completed"],
+            "successful": a_stats["total_completed"] + b_stats["total_completed"],
+            "failed": 0,
+            "expired": 0,
+            "completion_rate_pct": round(
+                ((a_stats["total_completed"] + b_stats["total_completed"]) / (submitted_a + submitted_b) * 100.0)
+                if (submitted_a + submitted_b) else 0.0,
+                2,
+            ),
+        },
+        "latency_ms": latency_percentiles_ms(since_epoch=start, prefix=f"{prefix}-"),
+        "limits_per_model": observed_limits_per_model(
+            completions,
+            {
+                "model-a": {"rpm": 30_000, "tpm": 60_000_000},
+                "model-b": {"rpm": 20_000, "tpm": 40_000_000},
+            },
+        ),
         "submitted_a": submitted_a,
         "submitted_b": submitted_b,
         "model_a": a_stats,
@@ -363,6 +533,7 @@ def scenario3() -> ScenarioResult:
         })
 
     print(f"Submitting batch of {batch_size}...")
+    run_start = time.time()
     t0 = time.time()
     body = {"callbackUrl": CALLBACK_URL, "requests": requests}
     data = json.dumps(body).encode()
@@ -382,16 +553,20 @@ def scenario3() -> ScenarioResult:
     print("Waiting for batch completion...")
     end = time.time() + 1800
     batch_status = None
+    batch_completed_at: float | None = None
     while time.time() < end:
         batch_status = api("GET", f"/v1/batches/{batch_id}")
         if batch_status["status"] == "COMPLETED":
+            batch_completed_at = time.time()
             break
         time.sleep(5)
 
     print("Waiting for callback delivery...")
+    callback_delivered_at: float | None = None
     while time.time() < end:
         batch_status = api("GET", f"/v1/batches/{batch_id}")
         if batch_status.get("callbackStatus") == "DELIVERED":
+            callback_delivered_at = time.time()
             break
         time.sleep(3)
 
@@ -406,6 +581,18 @@ def scenario3() -> ScenarioResult:
     total_db, distinct_db = ids_db.split("|")
 
     last_callback = callback_data["received"][-1]["body"] if callback_data["received"] else {}
+    counts = request_counts(batch_id=batch_id)
+    completions = fetch_completions(run_start)
+    configured_limits = {
+        "model-a": {"rpm": 50_000, "tpm": 100_000_000},
+        "model-b": {"rpm": 50_000, "tpm": 100_000_000},
+    }
+    batch_processing_ms = round((batch_completed_at - run_start) * 1000, 1) if batch_completed_at else None
+    callback_after_batch_ms = (
+        round((callback_delivered_at - batch_completed_at) * 1000, 1)
+        if batch_completed_at and callback_delivered_at else None
+    )
+    callback_total_ms = round((callback_delivered_at - run_start) * 1000, 1) if callback_delivered_at else None
 
     passed = (
         ack_ms < 1000
@@ -419,6 +606,23 @@ def scenario3() -> ScenarioResult:
     )
 
     details = {
+        "summary": {
+            "submitted": counts["submitted"],
+            "completed": counts["completed"],
+            "successful": counts["successful"],
+            "failed": counts["failed"],
+            "expired": counts["expired"],
+            "completion_rate_pct": counts["completion_rate_pct"],
+        },
+        "latency_ms": latency_percentiles_ms(batch_id=batch_id),
+        "limits_per_model": observed_limits_per_model(completions, configured_limits),
+        "timing": {
+            "batch_ack_ms": round(ack_ms, 1),
+            "batch_processing_ms": batch_processing_ms,
+            "callback_after_batch_ms": callback_after_batch_ms,
+            "callback_total_ms": callback_total_ms,
+            "callback_attempts": callback_data["count"],
+        },
         "ack_ms": round(ack_ms, 1),
         "batch_status": batch_status,
         "callback_attempts": callback_data["count"],
@@ -437,9 +641,9 @@ def wait_for_service() -> None:
             return
         except Exception:
             if attempt % 10 == 0:
-                print(f"Waiting for ingest-api... ({attempt * 2}s)")
+                print(f"Waiting for inference-gateway... ({attempt * 2}s)")
             time.sleep(2)
-    raise RuntimeError("ingest-api not ready")
+    raise RuntimeError("inference-gateway not ready")
 
 
 def main() -> int:
@@ -447,13 +651,13 @@ def main() -> int:
     reset_pipeline_state()
     results: list[ScenarioResult] = []
 
-    only = sys.argv[1:] if len(sys.argv) > 1 else None
+    selected = set(sys.argv[1:]) if len(sys.argv) > 1 else None
 
-    if not only or "1" in only:
+    if selected is None or "1" in selected:
         results.append(scenario1())
-    if not only or "2" in only:
+    if selected is None or "2" in selected:
         results.append(scenario2())
-    if not only or "3" in only:
+    if selected is None or "3" in selected:
         results.append(scenario3())
 
     print("\n" + "=" * 60)
@@ -466,21 +670,9 @@ def main() -> int:
         if not r.passed:
             all_pass = False
 
-    report_path = REPO_ROOT / "BENCHMARK.md"
-    with open(report_path, "w") as f:
-        f.write("# Benchmark & Validation Report\n\n")
-        f.write(f"Generated: {datetime.now(timezone.utc).isoformat()}\n\n")
-        f.write("## Environment\n\n")
-        f.write("- Docker Compose stack on local machine\n")
-        f.write("- Java 21 microservices + Kafka + Postgres + Redis\n\n")
-        f.write("## Scenario Results\n\n")
-        for r in results:
-            f.write(f"### {r.name}: {'PASS' if r.passed else 'FAIL'}\n\n")
-            f.write("```json\n")
-            f.write(json.dumps(r.details, indent=2))
-            f.write("\n```\n\n")
+    write_benchmark_report(results)
 
-    print(f"\nReport written to {report_path}")
+    print(f"\nReport written to {REPO_ROOT / 'BENCHMARK.md'}")
     return 0 if all_pass else 1
 
 

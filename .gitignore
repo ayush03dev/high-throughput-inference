@@ -1,0 +1,14 @@
+target/
+.idea/
+*.iml
+.classpath
+.project
+.settings/
+.DS_Store
+node_modules/
+.env
+*.log
+.cursor/
+BENCHMARK.md
+DESIGN.md
+DEVELOPMENT_PLAN.md

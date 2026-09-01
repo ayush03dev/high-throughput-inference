@@ -1,0 +1,38 @@
+spring:
+  application:
+    name: scheduler-worker
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:inference}
+    username: ${POSTGRES_USER:inference}
+    password: ${POSTGRES_PASSWORD:inference}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  flyway:
+    enabled: false
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+
+server:
+  port: 8081
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus,info
+
+inference:
+  provider-url: ${PROVIDER_URL:http://localhost:8082}
+  max-queue-wait-ms: 300000
+  kafka:
+    requests-topic: inference.requests
+    consumer-group: scheduler-workers

@@ -1,0 +1,22 @@
+server:
+  port: 8082
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus,info
+  endpoint:
+    health:
+      show-details: always
+
+provider:
+  default-latency-ms: ${PROVIDER_DEFAULT_LATENCY_MS:5}
+  failure-rate: ${PROVIDER_FAILURE_RATE:0.0}
+  models:
+    model-a:
+      latency-ms: ${PROVIDER_MODEL_A_LATENCY_MS:5}
+      failure-rate: ${PROVIDER_MODEL_A_FAILURE_RATE:0.0}
+    model-b:
+      latency-ms: ${PROVIDER_MODEL_B_LATENCY_MS:5}
+      failure-rate: ${PROVIDER_MODEL_B_FAILURE_RATE:0.0}

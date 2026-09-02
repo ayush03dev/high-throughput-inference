@@ -65,16 +65,26 @@ public class CallbackDeliveryService {
         for (int attempt = 0; attempt < maxAttempts; attempt++) {
             batch.setCallbackAttempts(batch.getCallbackAttempts() + 1);
             batchRepository.save(batch);
+            log.info(
+                    "[webhook] delivering batch={} attempt={}/{} url={}",
+                    event.batchId(),
+                    batch.getCallbackAttempts(),
+                    maxAttempts,
+                    event.callbackUrl()
+            );
             if (post(event.callbackUrl(), payload)) {
                 batch.setCallbackStatus(CallbackStatus.DELIVERED);
                 batchRepository.save(batch);
+                log.info("[webhook] batch {} delivered successfully on attempt {}", event.batchId(), batch.getCallbackAttempts());
                 return true;
             }
+            log.warn("[webhook] batch {} attempt {} failed — retrying", event.batchId(), batch.getCallbackAttempts());
             sleep(BACKOFF_MS.get(Math.min(attempt, BACKOFF_MS.size() - 1)));
         }
 
         batch.setCallbackStatus(CallbackStatus.FAILED);
         batchRepository.save(batch);
+        log.error("[webhook] batch {} delivery failed after {} attempts", event.batchId(), maxAttempts);
         return false;
     }
 

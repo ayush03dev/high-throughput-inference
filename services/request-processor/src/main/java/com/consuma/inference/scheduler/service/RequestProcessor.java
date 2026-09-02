@@ -14,6 +14,8 @@ import com.consuma.inference.common.service.BatchProgressService;
 import com.consuma.inference.common.service.ModelConfigService;
 import com.consuma.inference.scheduler.client.ProviderClient;
 import com.fasterxml.jackson.databind.JsonNode;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
@@ -21,9 +23,18 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Service
 public class RequestProcessor {
+
+    private static final Logger log = LoggerFactory.getLogger(RequestProcessor.class);
+    private static final long COMPLETED_LOG_EVERY = 100;
+    private static final long RATE_LIMIT_LOG_EVERY = 50;
+
+    private final AtomicLong completedCounter = new AtomicLong();
+    private final ConcurrentHashMap<String, AtomicLong> rateLimitCounters = new ConcurrentHashMap<>();
 
     private final RequestRepository requestRepository;
     private final SlidingWindowRateLimiter rateLimiter;
@@ -68,6 +79,7 @@ public class RequestProcessor {
         ModelConfigService.ModelLimits limits = modelConfigService.getLimits(event.model());
         if (!rateLimiter.tryAcquire(event.model(), event.requestId(), event.estimatedTokens(),
                 limits.rpmLimit(), limits.tpmLimit())) {
+            logRateLimited(event.model(), event.requestId(), limits.rpmLimit(), limits.tpmLimit());
             return ProcessResult.RETRY;
         }
 
@@ -95,7 +107,36 @@ public class RequestProcessor {
         );
 
         batchProgressService.recordTerminalRequest(request).ifPresent(this::maybePublishCallback);
+        logCompleted(event.requestId(), event.model(), request.getState(), event.batchId());
         return ProcessResult.COMPLETED;
+    }
+
+    private void logRateLimited(String model, String requestId, long rpmLimit, long tpmLimit) {
+        long count = rateLimitCounters.computeIfAbsent(model, ignored -> new AtomicLong()).incrementAndGet();
+        if (count == 1 || count % RATE_LIMIT_LOG_EVERY == 0) {
+            log.info(
+                    "[processor] rate limited model={} request={} (rpmLimit={} tpmLimit={} throttled={})",
+                    model,
+                    requestId,
+                    rpmLimit,
+                    tpmLimit,
+                    count
+            );
+        }
+    }
+
+    private void logCompleted(String requestId, String model, RequestState state, String batchId) {
+        long count = completedCounter.incrementAndGet();
+        if (count == 1 || count % COMPLETED_LOG_EVERY == 0) {
+            log.info(
+                    "[processor] completed request={} model={} state={} batch={} (total completed={})",
+                    requestId,
+                    model,
+                    state,
+                    batchId == null ? "-" : batchId,
+                    count
+            );
+        }
     }
 
     private boolean isExpired(RequestEntity request) {
@@ -111,6 +152,11 @@ public class RequestProcessor {
 
     private void maybePublishCallback(BatchEntity batch) {
         if (batch.getStatus() == BatchStatus.COMPLETED) {
+            log.info(
+                    "[processor] batch {} fully processed — enqueueing webhook delivery to {}",
+                    batch.getBatchId(),
+                    batch.getCallbackUrl()
+            );
             kafkaTemplate.send(
                     KafkaTopics.BATCH_CALLBACKS,
                     batch.getBatchId(),

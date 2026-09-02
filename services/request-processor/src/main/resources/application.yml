@@ -36,3 +36,11 @@ inference:
   kafka:
     requests-topic: inference.requests
     consumer-group: request-processors
+
+logging:
+  pattern:
+    console: "%d{HH:mm:ss.SSS} %-5level [%logger{20}] %msg%n"
+  level:
+    com.consuma.inference: INFO
+    org.apache.kafka: WARN
+    org.springframework.kafka: WARN

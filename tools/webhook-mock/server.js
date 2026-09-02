@@ -10,9 +10,12 @@ const received = [];
 app.post('/callback', (req, res) => {
   attemptCount += 1;
   received.push({ attempt: attemptCount, body: req.body, at: new Date().toISOString() });
+  const batchId = req.body?.batchId ?? 'unknown';
   if (attemptCount <= rejectAttempts) {
+    console.log(`[webhook-mock] REJECT batch=${batchId} attempt=${attemptCount}/${rejectAttempts + 1}`);
     return res.status(500).json({ error: 'simulated callback failure', attempt: attemptCount });
   }
+  console.log(`[webhook-mock] ACCEPT batch=${batchId} attempt=${attemptCount} total=${req.body?.total} succeeded=${req.body?.succeeded}`);
   return res.status(200).json({ status: 'ok', attempt: attemptCount });
 });
 

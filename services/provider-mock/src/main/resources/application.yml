@@ -20,3 +20,9 @@ provider:
     model-b:
       latency-ms: ${PROVIDER_MODEL_B_LATENCY_MS:5}
       failure-rate: ${PROVIDER_MODEL_B_FAILURE_RATE:0.0}
+
+logging:
+  pattern:
+    console: "%d{HH:mm:ss.SSS} %-5level [%logger{20}] %msg%n"
+  level:
+    com.consuma.inference: INFO

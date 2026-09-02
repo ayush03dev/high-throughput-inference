@@ -30,6 +30,13 @@ const agent = new Agent({ connections: 200, pipelining: 1 });
 let submitted = 0;
 let accepted = 0;
 const latencies = [];
+const startMs = Date.now();
+let lastProgressLog = startMs;
+
+function log(msg) {
+  const elapsed = ((Date.now() - startMs) / 1000).toFixed(0);
+  console.log(`[loadgen +${elapsed}s] ${msg}`);
+}
 
 function pickModel() {
   const entries = Object.entries(modelWeights);
@@ -57,23 +64,9 @@ async function submitSingle(id) {
     body: JSON.stringify(body),
     dispatcher: agent,
   });
-  const text = await res.body.text();
+  await res.body.text();
   if (res.statusCode === 202) accepted += 1;
   latencies.push(Date.now() - start);
-  return JSON.parse(text);
-}
-
-async function pollUntilDone(requestId, timeoutMs = 30000) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const res = await request(`${baseUrl}/v1/requests/${requestId}`, { dispatcher: agent });
-    const body = await res.body.json();
-    if (['SUCCEEDED', 'FAILED', 'EXPIRED', 'REJECTED'].includes(body.state)) {
-      return body;
-    }
-    await sleep(50);
-  }
-  return null;
 }
 
 async function submitBatch(batchIndex) {
@@ -98,6 +91,7 @@ async function submitBatch(batchIndex) {
   latencies.push(Date.now() - start);
   if (res.statusCode === 202) accepted += 1;
   submitted += requests.length;
+  log(`batch submitted batchId=${body.batchId} size=${requests.length} ackMs=${Date.now() - start}`);
   return body;
 }
 
@@ -112,14 +106,28 @@ function percentile(arr, p) {
   return sorted[Math.max(0, idx)];
 }
 
+function maybeLogProgress() {
+  const now = Date.now();
+  if (now - lastProgressLog < 5000) return;
+  lastProgressLog = now;
+  const elapsed = (now - startMs) / 1000;
+  const rps = elapsed > 0 ? (submitted / elapsed).toFixed(1) : '0';
+  log(`progress submitted=${submitted.toLocaleString()} accepted=${accepted.toLocaleString()} avgRps=${rps}`);
+}
+
 async function main() {
   const endAt = Date.now() + durationSec * 1000;
   let counter = 0;
   const intervalMs = Math.max(1, Math.floor(1000 / rate));
 
   if (batchSize > 1 && !opts.callbackUrl) {
-    console.error('batch-size > 1 requires --callback-url');
+    console.error('[loadgen] batch-size > 1 requires --callback-url');
     process.exit(1);
+  }
+
+  log(`starting url=${baseUrl} rate=${rate}/s duration=${durationSec}s models=${opts.models} tokens=${tokens}`);
+  if (batchSize > 1) {
+    log(`batch mode batchSize=${batchSize} callback=${opts.callbackUrl}`);
   }
 
   while (Date.now() < endAt) {
@@ -131,26 +139,34 @@ async function main() {
       submitted += 1;
       await submitSingle(id);
     }
+    maybeLogProgress();
     const elapsed = Date.now() - tickStart;
     const wait = intervalMs - elapsed;
     if (wait > 0) await sleep(wait);
   }
 
+  const elapsedSec = (Date.now() - startMs) / 1000;
   const report = {
     submitted,
     accepted,
-    durationSec,
+    durationSec: Math.round(elapsedSec),
     configuredRate: rate,
+    achievedRps: elapsedSec > 0 ? Math.round(submitted / elapsedSec) : 0,
     ackLatencyMs: {
       p50: percentile(latencies, 50),
       p95: percentile(latencies, 95),
       p99: percentile(latencies, 99),
     },
   };
+
+  log('=== run complete ===');
+  log(`submitted=${report.submitted.toLocaleString()} accepted=${report.accepted.toLocaleString()}`);
+  log(`achievedRps=${report.achievedRps} (configured=${rate})`);
+  log(`ackLatencyMs p50=${report.ackLatencyMs.p50} p95=${report.ackLatencyMs.p95} p99=${report.ackLatencyMs.p99}`);
   console.log(JSON.stringify(report, null, 2));
 }
 
 main().catch((err) => {
-  console.error(err);
+  console.error('[loadgen] ERROR', err);
   process.exit(1);
 });

@@ -2,6 +2,8 @@ package com.consuma.inference.common.service;
 
 import com.consuma.inference.common.entity.ModelEntity;
 import com.consuma.inference.common.repository.ModelRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -13,6 +15,7 @@ import java.util.Optional;
 @Service
 public class ModelConfigService {
 
+    private static final Logger log = LoggerFactory.getLogger(ModelConfigService.class);
     private static final String LIMITS_PREFIX = "limits:";
 
     private final ModelRepository modelRepository;
@@ -40,6 +43,7 @@ public class ModelConfigService {
         model.setUpdatedAt(Instant.now());
         ModelEntity saved = modelRepository.save(model);
         cacheLimits(saved);
+        log.info("[limits] model={} updated rpm={} tpm={} (redis cache refreshed)", name, rpmLimit, tpmLimit);
         return saved;
     }
 

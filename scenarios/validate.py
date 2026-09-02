@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 import sys
@@ -22,6 +23,21 @@ BASE_URL = "http://localhost:8080"
 CALLBACK_URL = "http://webhook-mock:9000/callback"
 TOKENS_PER_REQUEST = 1000
 PG_CONTAINER = "high-throughput-inference-postgres-1"
+
+
+def log(msg: str) -> None:
+    ts = datetime.now().strftime("%H:%M:%S")
+    print(f"[validate {ts}] {msg}", flush=True)
+
+
+def log_step(msg: str) -> None:
+    log(f"=== {msg} ===")
+
+
+def log_metrics(title: str, metrics: dict[str, Any]) -> None:
+    log(title)
+    for key, value in metrics.items():
+        log(f"  {key}: {value}")
 
 
 @dataclass
@@ -52,10 +68,12 @@ def psql(sql: str) -> str:
 
 
 def set_model_limits(name: str, rpm: int, tpm: int) -> None:
+    log(f"PUT /v1/admin/models/{name} → rpm={rpm:,} tpm={tpm:,}")
     api("PUT", f"/v1/admin/models/{name}", {"rpmLimit": rpm, "tpmLimit": tpm})
 
 
 def reset_callback_mock() -> None:
+    log("resetting webhook-mock (POST /reset)")
     req = urllib.request.Request("http://localhost:9000/reset", method="POST")
     with urllib.request.urlopen(req, timeout=5):
         pass
@@ -63,9 +81,10 @@ def reset_callback_mock() -> None:
 
 def reset_pipeline_state() -> None:
     """Clear queued work so scenarios start from a clean slate."""
+    log("truncating requests + batches in postgres")
     psql("TRUNCATE requests, batches")
     reset_callback_mock()
-    print("Pipeline state reset (truncated requests + batches)")
+    log("pipeline state reset complete")
 
 
 def submit_request(request_id: str, model: str, tokens: int = TOKENS_PER_REQUEST) -> bool:
@@ -97,11 +116,14 @@ def submit_load(prefix: str, model: str, count: int, workers: int = 100) -> int:
 
 def submit_load_duration(prefix: str, model: str, rate: int, duration_sec: int) -> int:
     submitted = 0
-    end = time.time() + duration_sec
+    start = time.time()
+    end = start + duration_sec
     interval = 1.0 / rate
     i = 0
     pool = ThreadPoolExecutor(max_workers=200)
+    last_log = start
 
+    log(f"loadgen start model={model} target={rate}/s duration={duration_sec}s prefix={prefix}")
     while time.time() < end:
         tick = time.time()
         batch = max(1, rate // 10)
@@ -112,8 +134,14 @@ def submit_load_duration(prefix: str, model: str, rate: int, duration_sec: int) 
         elapsed = time.time() - tick
         sleep = max(0, (batch * interval) - elapsed)
         time.sleep(sleep)
+        now = time.time()
+        if now - last_log >= 30:
+            elapsed_sec = int(now - start)
+            log(f"loadgen progress model={model} submitted={submitted:,} elapsed={elapsed_sec}s")
+            last_log = now
 
     pool.shutdown(wait=False)
+    log(f"loadgen done model={model} submitted={submitted:,} in {int(time.time() - start)}s")
     return submitted
 
 
@@ -178,6 +206,7 @@ def rpm_per_minute(completions: list[tuple[float, str, int]], model: str | None 
 
 def wait_for_completions(prefix: str, expected: int, timeout_sec: int = 600) -> dict[str, int]:
     end = time.time() + timeout_sec
+    log(f"waiting for completions prefix={prefix} expected={expected:,} timeout={timeout_sec}s")
     while time.time() < end:
         rows = psql(
             f"SELECT state, count(*) FROM requests WHERE request_id LIKE '{prefix}%' GROUP BY state"
@@ -188,7 +217,13 @@ def wait_for_completions(prefix: str, expected: int, timeout_sec: int = 600) -> 
                 s, c = line.split("|")
                 states[s] = int(c)
         terminal = states.get("SUCCEEDED", 0) + states.get("FAILED", 0) + states.get("EXPIRED", 0)
+        queued = states.get("QUEUED", 0) + states.get("IN_FLIGHT", 0)
+        log(
+            f"drain status terminal={terminal:,}/{expected:,} "
+            f"queued={states.get('QUEUED', 0):,} in_flight={states.get('IN_FLIGHT', 0):,}"
+        )
         if terminal >= expected:
+            log(f"drain complete succeeded={states.get('SUCCEEDED', 0):,} failed={states.get('FAILED', 0):,}")
             return states
         time.sleep(5)
     rows = psql(
@@ -340,23 +375,19 @@ def write_benchmark_report(results: list[ScenarioResult]) -> None:
             f.write(json.dumps(r.details, indent=2))
             f.write("\n```\n\n</details>\n\n")
 
-    print("\n" + "=" * 60)
-    print("SCENARIO 1: Reach provider capacity (50K RPM / 100M TPM)")
-    print("=" * 60)
+
+def scenario1() -> ScenarioResult:
+    log_step("SCENARIO 1: Reach provider capacity (50K RPM / 100M TPM)")
 
     set_model_limits("model-a", 50_000, 100_000_000)
     set_model_limits("model-b", 20_000, 40_000_000)
 
     start = time.time()
     duration_sec = 300  # 5 minutes
-    # Saturate the 50K RPM limiter (~833 req/s); local stack may still fall short on completion throughput.
     target_rate = 900
 
-    print(f"Submitting ~{target_rate}/s to model-a for {duration_sec}s...")
     submitted = submit_load_duration("s1", "model-a", target_rate, duration_sec)
-    print(f"Submitted: {submitted}")
 
-    print("Waiting for queue to drain (up to 10 min)...")
     states = wait_for_completions("s1-", submitted, timeout_sec=600)
     completions = fetch_completions(start)
 
@@ -407,14 +438,26 @@ def write_benchmark_report(results: list[ScenarioResult]) -> None:
         "tpm_limit": 100_000_000,
         "duration_sec": duration_sec,
     }
-    print(json.dumps(details, indent=2))
+    latency = details["latency_ms"]
+    log_metrics(
+        f"SCENARIO 1 {'PASS' if passed else 'FAIL'}",
+        {
+            "submitted": submitted,
+            "completed": total_terminal,
+            "completion_rate_pct": details["summary"]["completion_rate_pct"],
+            "max_rpm_60s": max_rpm,
+            "max_tpm_60s": max_tpm,
+            "avg_rpm_post_warmup": round(avg_rpm, 1),
+            "latency_p50_ms": latency["p50_ms"],
+            "latency_p95_ms": latency["p95_ms"],
+            "latency_p99_ms": latency["p99_ms"],
+        },
+    )
     return ScenarioResult("Scenario 1: Capacity", passed, details)
 
 
 def scenario2() -> ScenarioResult:
-    print("\n" + "=" * 60)
-    print("SCENARIO 2: Different models + changing limits")
-    print("=" * 60)
+    log_step("SCENARIO 2: Different models + changing limits")
 
     set_model_limits("model-a", 30_000, 60_000_000)
     set_model_limits("model-b", 20_000, 40_000_000)
@@ -423,18 +466,18 @@ def scenario2() -> ScenarioResult:
     prefix = "s2"
 
     # Phase 1: 0-90s full load both models
-    print("Phase 1 (0-90s): both models at full limits, high load...")
+    log("phase 1 (0-90s): full load on model-a and model-b")
     pool_a = ThreadPoolExecutor(max_workers=1)
     pool_b = ThreadPoolExecutor(max_workers=1)
     fa = pool_a.submit(submit_load_duration, f"{prefix}-a", "model-a", 800, 90)
     fb = pool_b.submit(submit_load_duration, f"{prefix}-b", "model-b", 500, 90)
 
     time.sleep(45)
-    print("Phase 2 (45s): throttle model-a to 5K RPM...")
+    log("phase 2 (45s): throttle model-a to 5K RPM")
     set_model_limits("model-a", 5_000, 60_000_000)
 
     time.sleep(45)
-    print("Phase 3 (90s): restore model-a to 30K RPM...")
+    log("phase 3 (90s): restore model-a to 30K RPM")
     set_model_limits("model-a", 30_000, 60_000_000)
 
     submitted_a = fa.result()
@@ -442,8 +485,8 @@ def scenario2() -> ScenarioResult:
     pool_a.shutdown()
     pool_b.shutdown()
 
-    print(f"Submitted model-a: {submitted_a}, model-b: {submitted_b}")
-    print("Waiting for drain...")
+    log(f"submitted model-a={submitted_a:,} model-b={submitted_b:,}")
+    log("waiting 120s for queue drain before measuring...")
     time.sleep(120)
 
     completions = fetch_completions(start)
@@ -507,14 +550,21 @@ def scenario2() -> ScenarioResult:
         "throttle_phase_max_rpm_a": throttle_max_rpm,
         "model_b_completions_during_a_throttle": len(b_during_throttle),
     }
-    print(json.dumps(details, indent=2))
+    log_metrics(
+        f"SCENARIO 2 {'PASS' if passed else 'FAIL'}",
+        {
+            "submitted": submitted_a + submitted_b,
+            "model_a_max_rpm": a_stats["max_rpm_60s"],
+            "model_b_max_rpm": b_stats["max_rpm_60s"],
+            "throttle_phase_max_rpm_a": throttle_max_rpm,
+            "model_b_completions_during_a_throttle": len(b_during_throttle),
+        },
+    )
     return ScenarioResult("Scenario 2: Limit changes", passed, details)
 
 
 def scenario3() -> ScenarioResult:
-    print("\n" + "=" * 60)
-    print("SCENARIO 3: Async batch (10K) + callback retries")
-    print("=" * 60)
+    log_step("SCENARIO 3: Async batch (10K) + callback retries")
 
     reset_callback_mock()
     set_model_limits("model-a", 50_000, 100_000_000)
@@ -532,7 +582,7 @@ def scenario3() -> ScenarioResult:
             "payload": {"i": i},
         })
 
-    print(f"Submitting batch of {batch_size}...")
+    log(f"submitting batch size={batch_size:,} callback={CALLBACK_URL}")
     run_start = time.time()
     t0 = time.time()
     body = {"callbackUrl": CALLBACK_URL, "requests": requests}
@@ -548,23 +598,31 @@ def scenario3() -> ScenarioResult:
     ack_ms = (time.time() - t0) * 1000
 
     batch_id = ack["batchId"]
-    print(f"Ack in {ack_ms:.0f}ms: {batch_id}")
+    log(f"batch ack in {ack_ms:.0f}ms batchId={batch_id}")
 
-    print("Waiting for batch completion...")
+    log("waiting for batch COMPLETED...")
     end = time.time() + 1800
     batch_status = None
     batch_completed_at: float | None = None
     while time.time() < end:
         batch_status = api("GET", f"/v1/batches/{batch_id}")
+        log(
+            f"batch status={batch_status['status']} "
+            f"succeeded={batch_status.get('succeeded', 0):,}/{batch_status.get('total', 0):,}"
+        )
         if batch_status["status"] == "COMPLETED":
             batch_completed_at = time.time()
             break
         time.sleep(5)
 
-    print("Waiting for callback delivery...")
+    log("waiting for callback DELIVERED...")
     callback_delivered_at: float | None = None
     while time.time() < end:
         batch_status = api("GET", f"/v1/batches/{batch_id}")
+        log(
+            f"callback status={batch_status.get('callbackStatus')} "
+            f"attempts={batch_status.get('callbackAttempts', 0)}"
+        )
         if batch_status.get("callbackStatus") == "DELIVERED":
             callback_delivered_at = time.time()
             break
@@ -630,7 +688,18 @@ def scenario3() -> ScenarioResult:
         "db_distinct_ids": int(distinct_db),
         "callback_summary": last_callback,
     }
-    print(json.dumps(details, indent=2))
+    log_metrics(
+        f"SCENARIO 3 {'PASS' if passed else 'FAIL'}",
+        {
+            "ack_ms": round(ack_ms, 1),
+            "batch_processing_ms": batch_processing_ms,
+            "callback_after_batch_ms": callback_after_batch_ms,
+            "callback_attempts": callback_data["count"],
+            "completion_rate_pct": counts["completion_rate_pct"],
+            "latency_p50_ms": details["latency_ms"]["p50_ms"],
+            "latency_p95_ms": details["latency_ms"]["p95_ms"],
+        },
+    )
     return ScenarioResult("Scenario 3: Batch + callback", passed, details)
 
 
@@ -641,38 +710,50 @@ def wait_for_service() -> None:
             return
         except Exception:
             if attempt % 10 == 0:
-                print(f"Waiting for inference-gateway... ({attempt * 2}s)")
+                log(f"waiting for inference-gateway at {BASE_URL} ({attempt * 2}s)")
             time.sleep(2)
     raise RuntimeError("inference-gateway not ready")
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run assignment validation scenarios")
+    parser.add_argument(
+        "scenarios",
+        nargs="*",
+        choices=["1", "2", "3"],
+        help="Scenarios to run (default: all). Example: validate.py 3",
+    )
+    return parser.parse_args()
+
+
 def main() -> int:
+    args = parse_args()
+    to_run = args.scenarios if args.scenarios else ["1", "2", "3"]
+    log_step(f"validation run — scenarios: {', '.join(to_run)}")
+    log(f"gateway={BASE_URL} callback={CALLBACK_URL}")
+
     wait_for_service()
     reset_pipeline_state()
     results: list[ScenarioResult] = []
 
-    selected = set(sys.argv[1:]) if len(sys.argv) > 1 else None
-
-    if selected is None or "1" in selected:
+    if "1" in to_run:
         results.append(scenario1())
-    if selected is None or "2" in selected:
+    if "2" in to_run:
         results.append(scenario2())
-    if selected is None or "3" in selected:
+    if "3" in to_run:
         results.append(scenario3())
 
-    print("\n" + "=" * 60)
-    print("SUMMARY")
-    print("=" * 60)
+    log_step("SUMMARY")
     all_pass = True
     for r in results:
         status = "PASS" if r.passed else "FAIL"
-        print(f"  [{status}] {r.name}")
+        log(f"[{status}] {r.name}")
         if not r.passed:
             all_pass = False
 
     write_benchmark_report(results)
 
-    print(f"\nReport written to {REPO_ROOT / 'BENCHMARK.md'}")
+    log(f"report written to {REPO_ROOT / 'BENCHMARK.md'}")
     return 0 if all_pass else 1
 
 

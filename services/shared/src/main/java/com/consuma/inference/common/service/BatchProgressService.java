@@ -6,6 +6,8 @@ import com.consuma.inference.common.entity.BatchEntity;
 import com.consuma.inference.common.entity.RequestEntity;
 import com.consuma.inference.common.repository.BatchRepository;
 import com.consuma.inference.common.repository.RequestRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -14,6 +16,8 @@ import java.util.Optional;
 
 @Service
 public class BatchProgressService {
+
+    private static final Logger log = LoggerFactory.getLogger(BatchProgressService.class);
 
     private final BatchRepository batchRepository;
     private final RequestRepository requestRepository;
@@ -42,10 +46,18 @@ public class BatchProgressService {
         }
         if (batch.getStatus() == BatchStatus.ACCEPTED) {
             batch.setStatus(BatchStatus.PROCESSING);
+            log.info("[batch] {} processing started (total={})", batch.getBatchId(), batch.getTotalRequests());
         }
         if (batch.getTerminalCount() >= batch.getTotalRequests()) {
             batch.setStatus(BatchStatus.COMPLETED);
             batch.setCompletedAt(Instant.now());
+            log.info(
+                    "[batch] {} completed: succeeded={} failed={} expired={}",
+                    batch.getBatchId(),
+                    batch.getSucceededCount(),
+                    batch.getFailedCount(),
+                    batch.getExpiredCount()
+            );
         }
         return Optional.of(batchRepository.save(batch));
     }

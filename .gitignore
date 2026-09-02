@@ -9,7 +9,6 @@ node_modules/
 .env
 *.log
 .cursor/
-BENCHMARK.md
 DESIGN.md
 DEVELOPMENT_PLAN.md
 __pycache__/

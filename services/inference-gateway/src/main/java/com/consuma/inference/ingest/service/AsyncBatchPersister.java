@@ -46,7 +46,7 @@ public class AsyncBatchPersister {
         for (int i = 0; i < events.size(); i++) {
             InferenceRequestEvent event = events.get(i);
             try {
-                kafkaTemplate.send(KafkaTopics.INFERENCE_REQUESTS, event.model(), event).get();
+                kafkaTemplate.send(KafkaTopics.INFERENCE_REQUESTS, event.requestId(), event).get();
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new IllegalStateException("Interrupted while publishing batch " + batchId, e);

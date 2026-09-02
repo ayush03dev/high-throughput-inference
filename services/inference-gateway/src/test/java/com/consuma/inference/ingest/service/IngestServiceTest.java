@@ -62,7 +62,7 @@ class IngestServiceTest {
         RequestEntity saved = ingestService.submitSingle(request);
 
         assertEquals(RequestState.QUEUED, saved.getState());
-        verify(kafkaTemplate).send(eq(KafkaTopics.INFERENCE_REQUESTS), eq("model-a"), any(InferenceRequestEvent.class));
+        verify(kafkaTemplate).send(eq(KafkaTopics.INFERENCE_REQUESTS), eq("req-1"), any(InferenceRequestEvent.class));
     }
 
     @Test

@@ -35,7 +35,10 @@ inference:
   max-queue-wait-ms: 300000
   kafka:
     requests-topic: inference.requests
+    retry-topic: inference.requests.retry
     consumer-group: request-processors
+    retry-consumer-group: request-processors-retry
+    retry-delay-ms: 100
 
 logging:
   pattern:

@@ -124,6 +124,6 @@ public class IngestService {
                 entity.getEstimatedTokens(),
                 entity.getPayload()
         );
-        kafkaTemplate.send(KafkaTopics.INFERENCE_REQUESTS, entity.getModel(), event);
+        kafkaTemplate.send(KafkaTopics.INFERENCE_REQUESTS, entity.getRequestId(), event);
     }
 }

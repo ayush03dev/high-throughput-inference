@@ -3,7 +3,6 @@
 Production-style inference gateway: **Java microservices + Kafka + PostgreSQL + Redis**, with **Node.js** load and webhook test tools. Single monorepo.
 
 ## Project layout
-asd
 
 ```
 high-throughput-inference/
@@ -37,6 +36,16 @@ high-throughput-inference/
 - Docker Desktop
 - Node.js 20+ (for loadgen / webhook-mock)
 - Python 3.10+ (stdlib only — for `scenarios/validate.py`)
+
+## Installation
+
+```bash
+# Node.js tools (loadgen, webhook-mock) — required for local CLI usage outside Docker
+(cd tools/loadgen && npm install)
+(cd tools/webhook-mock && npm install)
+```
+
+Docker Compose builds and installs Node dependencies inside the `webhook-mock` image automatically; the commands above are only needed if you run `loadgen` or `webhook-mock` directly on the host.
 
 ## Quick start
 
@@ -104,7 +113,7 @@ curl -s -X PUT http://localhost:8082/v1/admin/models/model-a/failure-rate \
 ## Load generator
 
 ```bash
-cd tools/loadgen && npm install
+cd tools/loadgen
 
 # single-request mode: 500 req/s for 60s against model-a, with completion tracking
 node index.js --url http://localhost:8081 --rate 500 --duration 60 \

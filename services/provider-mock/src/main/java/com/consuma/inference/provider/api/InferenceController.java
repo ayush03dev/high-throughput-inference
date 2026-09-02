@@ -31,9 +31,9 @@ public class InferenceController {
         long count = requestCounter.incrementAndGet();
         if (count == 1 || count % LOG_EVERY == 0) {
             log.info(
-                    "[provider] inference request={} model={} status={} (total={})",
-                    request.requestId(),
+                    "[mock] simulated {} call for request={} -> {} (served so far: {})",
                     request.model(),
+                    request.requestId(),
                     response.status(),
                     count
             );

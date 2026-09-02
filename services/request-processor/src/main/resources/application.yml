@@ -8,6 +8,17 @@ spring:
     url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5433}/${POSTGRES_DB:inference}
     username: ${POSTGRES_USER:inference}
     password: ${POSTGRES_PASSWORD:inference}
+    hikari:
+      # RequestProcessor.markInFlight/finalizeRequest each open their own
+      # @Transactional DB round trip, and both the primary and retry Kafka
+      # consumer groups run inference.kafka.listener-concurrency (32) threads
+      # concurrently — the previous default pool size of 10 meant most of
+      # those 64 possible concurrent threads were blocked waiting for a
+      # connection instead of processing, capping real throughput well below
+      # the configured RPM limit. Sized to cover both groups at full
+      # concurrency; Postgres's max_connections (100 by default) has room to
+      # spare alongside inference-gateway and webhook-delivery's pools.
+      maximum-pool-size: ${DB_POOL_SIZE:64}
   jpa:
     hibernate:
       ddl-auto: validate
@@ -39,6 +50,7 @@ inference:
     consumer-group: request-processors
     retry-consumer-group: request-processors-retry
     retry-delay-ms: 50
+    listener-concurrency: ${KAFKA_LISTENER_CONCURRENCY:32}
 
 logging:
   pattern:

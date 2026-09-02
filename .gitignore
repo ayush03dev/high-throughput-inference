@@ -12,3 +12,5 @@ node_modules/
 BENCHMARK.md
 DESIGN.md
 DEVELOPMENT_PLAN.md
+__pycache__/
+demo-batch.json

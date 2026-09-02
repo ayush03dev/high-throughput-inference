@@ -35,7 +35,7 @@ public class AsyncBatchPersister {
     public void persistAndPublish(String batchId, List<SubmitInferenceRequest> requests, Instant submittedAt) {
         long startMs = System.currentTimeMillis();
         batchJdbcInserter.insertAll(batchId, requests, submittedAt);
-        log.info("[gateway] batch {} persisted {} requests to database", batchId, requests.size());
+        log.info("[gateway] batch {}: {} requests written to Postgres", batchId, requests.size());
 
         List<InferenceRequestEvent> events = new ArrayList<>(requests.size());
         for (SubmitInferenceRequest req : requests) {
@@ -55,12 +55,12 @@ public class AsyncBatchPersister {
             }
             if ((i + 1) % PUBLISH_CHUNK_SIZE == 0) {
                 kafkaTemplate.flush();
-                log.info("[gateway] batch {} published {}/{} to kafka", batchId, i + 1, events.size());
+                log.info("[gateway] batch {}: {}/{} requests handed off to Kafka so far", batchId, i + 1, events.size());
             }
         }
         kafkaTemplate.flush();
         log.info(
-                "[gateway] batch {} ready for processing: {} kafka messages in {}ms",
+                "[gateway] batch {} fully queued for processing — {} Kafka messages in {}ms",
                 batchId,
                 events.size(),
                 System.currentTimeMillis() - startMs

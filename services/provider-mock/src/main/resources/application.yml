@@ -1,3 +1,10 @@
+spring:
+  application:
+    name: provider-mock
+  threads:
+    virtual:
+      enabled: true
+
 server:
   port: 8082
 
@@ -23,6 +30,6 @@ provider:
 
 logging:
   pattern:
-    console: "%d{HH:mm:ss.SSS} %-5level [%logger{20}] %msg%n"
+    console: "%d{HH:mm:ss.SSS} %clr(%-5level){magenta} %clr([MOCK]){magenta} [%logger{20}] %msg%n"
   level:
     com.consuma.inference: INFO

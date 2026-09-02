@@ -43,13 +43,19 @@ public class KafkaConfig {
 
     @Bean
     public ConcurrentKafkaListenerContainerFactory<String, InferenceRequestEvent> manualAckKafkaListenerContainerFactory(
-            ConsumerFactory<String, InferenceRequestEvent> consumerFactory
+            ConsumerFactory<String, InferenceRequestEvent> consumerFactory,
+            @Value("${inference.kafka.listener-concurrency:32}") int listenerConcurrency
     ) {
         ConcurrentKafkaListenerContainerFactory<String, InferenceRequestEvent> factory =
                 new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(consumerFactory);
         factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL);
-        factory.setConcurrency(8);
+        // Each concurrent thread processes its assigned partitions' records one at a
+        // time (including the blocking provider call in ProviderClient), so this caps
+        // in-flight provider calls per group. Defaults to the topics' partition count
+        // (32, see KafkaProducerConfig) so a single instance can use full partition
+        // parallelism instead of leaving most partitions idle behind 8 threads.
+        factory.setConcurrency(listenerConcurrency);
         return factory;
     }
 

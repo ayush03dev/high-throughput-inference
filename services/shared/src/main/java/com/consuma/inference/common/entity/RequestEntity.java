@@ -45,6 +45,15 @@ public class RequestEntity {
     @Column(name = "submitted_at", nullable = false)
     private Instant submittedAt;
 
+    // Set once, in RequestProcessor.markInFlight, at the moment the rate
+    // limiter actually admitted this request — distinct from submittedAt
+    // (client ingest time) and completedAt (provider call finished). This is
+    // the timestamp external validation should use to measure the RPM/TPM
+    // sliding window, since it's the same instant the limiter enforced
+    // against; completedAt can lag it by a long, variable amount under load.
+    @Column(name = "admitted_at")
+    private Instant admittedAt;
+
     @Column(name = "completed_at")
     private Instant completedAt;
 
@@ -113,6 +122,14 @@ public class RequestEntity {
 
     public void setSubmittedAt(Instant submittedAt) {
         this.submittedAt = submittedAt;
+    }
+
+    public Instant getAdmittedAt() {
+        return admittedAt;
+    }
+
+    public void setAdmittedAt(Instant admittedAt) {
+        this.admittedAt = admittedAt;
     }
 
     public Instant getCompletedAt() {

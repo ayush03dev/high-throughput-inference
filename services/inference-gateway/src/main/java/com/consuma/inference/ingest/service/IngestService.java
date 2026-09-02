@@ -14,9 +14,9 @@ import com.consuma.inference.ingest.dto.SubmitBatchRequest;
 import com.consuma.inference.ingest.dto.SubmitInferenceRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.util.HashSet;
@@ -53,7 +53,16 @@ public class IngestService {
         this.asyncBatchPersister = asyncBatchPersister;
     }
 
-    @Transactional
+    // Deliberately NOT @Transactional, for the same reason as submitBatch below:
+    // publish() sends the Kafka message that request-processor consumes. If this
+    // method were wrapped in a transaction, the save() below wouldn't actually
+    // commit until the method returns — so a fast consumer could poll the
+    // message, call requestRepository.findById, find nothing yet (row not
+    // committed), and silently drop the request forever (process() treats a
+    // missing row as SKIPPED, acks the message, and there is no other trigger
+    // to ever reprocess it). Saving outside a transaction commits immediately
+    // (Spring Data repositories are transactional per-call), so the row is
+    // durably visible before publish() is even called.
     public RequestEntity submitSingle(SubmitInferenceRequest request) {
         Optional<RequestEntity> existing = requestRepository.findById(request.requestId());
         if (existing.isPresent()) {
@@ -61,16 +70,29 @@ public class IngestService {
         }
         validateModel(request.model());
         RequestEntity entity = buildRequest(request, null);
-        requestRepository.save(entity);
+        try {
+            requestRepository.save(entity);
+        } catch (DataIntegrityViolationException e) {
+            // Lost a race with a concurrent submission of the same requestId
+            // (the findById check above is no longer inside one transaction
+            // with this save, so it's not atomic against a duplicate insert).
+            return requestRepository.findById(request.requestId()).orElseThrow(() -> e);
+        }
         publish(entity);
         long accepted = singleRequestCounter.incrementAndGet();
         if (accepted == 1 || accepted % SINGLE_REQUEST_LOG_EVERY == 0) {
-            log.info("[gateway] accepted request={} model={} (total accepted={})", entity.getRequestId(), entity.getModel(), accepted);
+            log.info("[gateway] ingested request {} for {} — handed off to Kafka (accepted so far: {})", entity.getRequestId(), entity.getModel(), accepted);
         }
         return entity;
     }
 
-    @Transactional
+    // Deliberately NOT @Transactional: asyncBatchPersister.persistAndPublish runs on a
+    // separate thread/connection via @Async. If this method were wrapped in a
+    // transaction, the batch row wouldn't commit until the method returns, so the async
+    // thread could try to insert child requests before the parent batch row is visible
+    // to it, tripping the requests_batch_id_fkey constraint. saveAndFlush below commits
+    // in its own transaction (Spring Data repositories are transactional per-call), so
+    // the batch row is durably visible before the async persister is invoked.
     public BatchAcceptedResponse submitBatch(SubmitBatchRequest batchRequest) {
         List<SubmitInferenceRequest> requests = batchRequest.requests();
         Set<String> seen = new HashSet<>();
@@ -89,7 +111,7 @@ public class IngestService {
         Instant now = Instant.now();
         batchRepository.saveAndFlush(new BatchEntity(batchId, batchRequest.callbackUrl(), requests.size()));
         log.info(
-                "[gateway] batch accepted batchId={} size={} callbackUrl={}",
+                "[gateway] new batch {} queued — {} requests, callback -> {}",
                 batchId,
                 requests.size(),
                 batchRequest.callbackUrl()

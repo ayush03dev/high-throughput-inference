@@ -111,6 +111,7 @@ public class RequestProcessor {
             return false;
         }
         request.setState(RequestState.IN_FLIGHT);
+        request.setAdmittedAt(Instant.now());
         requestRepository.save(request);
         return true;
     }

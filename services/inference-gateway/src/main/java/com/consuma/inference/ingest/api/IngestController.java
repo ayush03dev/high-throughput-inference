@@ -61,6 +61,7 @@ public class IngestController {
                 entity.getResult(),
                 entity.getErrorMessage(),
                 entity.getSubmittedAt(),
+                entity.getAdmittedAt(),
                 entity.getCompletedAt()
         );
     }
@@ -81,6 +82,25 @@ public class IngestController {
                 batch.getCreatedAt(),
                 batch.getCompletedAt()
         );
+    }
+
+    @GetMapping("/batches/{batchId}/results")
+    public List<RequestStatusResponse> getBatchResults(@PathVariable("batchId") String batchId) {
+        if (!batchRepository.existsById(batchId)) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Batch not found");
+        }
+        return requestRepository.findByBatchId(batchId).stream()
+                .map(entity -> new RequestStatusResponse(
+                        entity.getRequestId(),
+                        entity.getBatchId(),
+                        entity.getModel(),
+                        entity.getState(),
+                        entity.getResult(),
+                        entity.getErrorMessage(),
+                        entity.getSubmittedAt(),
+                        entity.getAdmittedAt(),
+                        entity.getCompletedAt()))
+                .toList();
     }
 
     @GetMapping("/admin/models")

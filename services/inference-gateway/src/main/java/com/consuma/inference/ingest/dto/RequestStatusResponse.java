@@ -13,6 +13,7 @@ public record RequestStatusResponse(
         JsonNode result,
         String errorMessage,
         Instant submittedAt,
+        Instant admittedAt,
         Instant completedAt
 ) {
 }

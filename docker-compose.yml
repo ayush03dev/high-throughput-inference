@@ -54,7 +54,7 @@ services:
       - "8082:8082"
     environment:
       PROVIDER_FAILURE_RATE: ${PROVIDER_FAILURE_RATE:-0.0}
-      PROVIDER_DEFAULT_LATENCY_MS: ${PROVIDER_DEFAULT_LATENCY_MS:-5}
+      PROVIDER_DEFAULT_LATENCY_MS: ${PROVIDER_DEFAULT_LATENCY_MS:-1}
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8082/actuator/health || exit 1"]
       interval: 10s

@@ -11,6 +11,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.concurrent.Executors;
 
 @Component
 public class ProviderClient {
@@ -24,6 +25,7 @@ public class ProviderClient {
         this.providerUrl = providerUrl;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(5))
+                .executor(Executors.newVirtualThreadPerTaskExecutor())
                 .build();
     }
 

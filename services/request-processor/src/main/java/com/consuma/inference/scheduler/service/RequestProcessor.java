@@ -51,7 +51,7 @@ public class RequestProcessor {
             ProviderClient providerClient,
             BatchProgressService batchProgressService,
             KafkaTemplate<String, Object> kafkaTemplate,
-            @Value("${inference.max-queue-wait-ms:300000}") long maxQueueWaitMs
+            @Value("${inference.max-queue-wait-ms:1200000}") long maxQueueWaitMs
     ) {
         this.requestRepository = requestRepository;
         this.rateLimiter = rateLimiter;
@@ -62,7 +62,6 @@ public class RequestProcessor {
         this.maxQueueWaitMs = maxQueueWaitMs;
     }
 
-    @Transactional
     public ProcessResult process(InferenceRequestEvent event) {
         RequestEntity request = requestRepository.findById(event.requestId()).orElse(null);
         if (request == null) {
@@ -72,7 +71,7 @@ public class RequestProcessor {
             return ProcessResult.SKIPPED;
         }
         if (isExpired(request)) {
-            markExpired(request);
+            expireRequest(request);
             return ProcessResult.COMPLETED;
         }
 
@@ -83,19 +82,56 @@ public class RequestProcessor {
             return ProcessResult.RETRY;
         }
 
-        request.setState(RequestState.IN_FLIGHT);
-        requestRepository.save(request);
+        if (!markInFlight(event.requestId())) {
+            return ProcessResult.SKIPPED;
+        }
 
         ProviderClient.ProviderResult result = providerClient.invoke(
                 event.requestId(), event.model(), event.estimatedTokens(), event.payload()
         );
 
-        if (result.success()) {
+        finalizeRequest(event, result.success(), result.result(), result.error());
+        logCompleted(event.requestId(), event.model(),
+                result.success() ? RequestState.SUCCEEDED : RequestState.FAILED, event.batchId());
+        return ProcessResult.COMPLETED;
+    }
+
+    @Transactional
+    protected void expireRequest(RequestEntity request) {
+        request.setState(RequestState.EXPIRED);
+        request.setCompletedAt(Instant.now());
+        requestRepository.save(request);
+        batchProgressService.recordTerminalRequest(request).ifPresent(this::maybePublishCallback);
+    }
+
+    @Transactional
+    protected boolean markInFlight(String requestId) {
+        RequestEntity request = requestRepository.findById(requestId).orElse(null);
+        if (request == null || request.getState() != RequestState.QUEUED) {
+            return false;
+        }
+        request.setState(RequestState.IN_FLIGHT);
+        requestRepository.save(request);
+        return true;
+    }
+
+    @Transactional
+    protected void finalizeRequest(
+            InferenceRequestEvent event,
+            boolean success,
+            JsonNode result,
+            String error
+    ) {
+        RequestEntity request = requestRepository.findById(event.requestId()).orElse(null);
+        if (request == null || request.getState() != RequestState.IN_FLIGHT) {
+            return;
+        }
+        if (success) {
             request.setState(RequestState.SUCCEEDED);
-            request.setResult(result.result());
+            request.setResult(result);
         } else {
             request.setState(RequestState.FAILED);
-            request.setErrorMessage(result.error());
+            request.setErrorMessage(error);
         }
         request.setCompletedAt(Instant.now());
         requestRepository.save(request);
@@ -107,8 +143,6 @@ public class RequestProcessor {
         );
 
         batchProgressService.recordTerminalRequest(request).ifPresent(this::maybePublishCallback);
-        logCompleted(event.requestId(), event.model(), request.getState(), event.batchId());
-        return ProcessResult.COMPLETED;
     }
 
     private void logRateLimited(String model, String requestId, long rpmLimit, long tpmLimit) {
@@ -141,13 +175,6 @@ public class RequestProcessor {
 
     private boolean isExpired(RequestEntity request) {
         return request.getSubmittedAt().plus(maxQueueWaitMs, ChronoUnit.MILLIS).isBefore(Instant.now());
-    }
-
-    private void markExpired(RequestEntity request) {
-        request.setState(RequestState.EXPIRED);
-        request.setCompletedAt(Instant.now());
-        requestRepository.save(request);
-        batchProgressService.recordTerminalRequest(request).ifPresent(this::maybePublishCallback);
     }
 
     private void maybePublishCallback(BatchEntity batch) {

@@ -40,17 +40,17 @@ public class KafkaProducerConfig {
 
     @Bean
     public NewTopic inferenceRequestsTopic() {
-        return new NewTopic(KafkaTopics.INFERENCE_REQUESTS, 8, (short) 1);
+        return new NewTopic(KafkaTopics.INFERENCE_REQUESTS, 32, (short) 1);
     }
 
     @Bean
     public NewTopic inferenceRequestsRetryTopic() {
-        return new NewTopic(KafkaTopics.INFERENCE_REQUESTS_RETRY, 8, (short) 1);
+        return new NewTopic(KafkaTopics.INFERENCE_REQUESTS_RETRY, 32, (short) 1);
     }
 
     @Bean
     public NewTopic inferenceCompletedTopic() {
-        return new NewTopic(KafkaTopics.INFERENCE_COMPLETED, 8, (short) 1);
+        return new NewTopic(KafkaTopics.INFERENCE_COMPLETED, 32, (short) 1);
     }
 
     @Bean

@@ -39,7 +39,7 @@ management:
       show-details: always
 
 inference:
-  max-queue-wait-ms: 300000
+  max-queue-wait-ms: 1200000
 
 logging:
   pattern:

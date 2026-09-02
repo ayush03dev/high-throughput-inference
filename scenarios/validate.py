@@ -145,11 +145,26 @@ def submit_load_duration(prefix: str, model: str, rate: int, duration_sec: int) 
     return submitted
 
 
-def fetch_completions(since_epoch: float) -> list[tuple[float, str, int]]:
+def fetch_completions(
+    since_epoch: float,
+    *,
+    states: tuple[str, ...] | None = None,
+    prefix: str | None = None,
+) -> list[tuple[float, str, int]]:
     since = datetime.fromtimestamp(since_epoch, tz=timezone.utc).isoformat()
+    clauses = [
+        "completed_at IS NOT NULL",
+        f"submitted_at >= '{since}'",
+    ]
+    if states:
+        quoted = ", ".join(f"'{state}'" for state in states)
+        clauses.append(f"state IN ({quoted})")
+    if prefix:
+        clauses.append(f"request_id LIKE '{prefix}%'")
+    where = " AND ".join(clauses)
     rows = psql(
-        f"SELECT extract(epoch from completed_at)::bigint, model, estimated_tokens "
-        f"FROM requests WHERE completed_at IS NOT NULL AND submitted_at >= '{since}' "
+        f"SELECT extract(epoch from completed_at), model, estimated_tokens "
+        f"FROM requests WHERE {where} "
         f"ORDER BY completed_at"
     )
     if not rows:
@@ -202,6 +217,14 @@ def rpm_per_minute(completions: list[tuple[float, str, int]], model: str | None 
         minute = int(ts // 60)
         buckets[minute] += 1
     return dict(buckets)
+
+
+def avg_rpm_in_window(timestamps: list[float], window_start: float, window_end: float) -> float:
+    if window_end <= window_start:
+        return 0.0
+    count = sum(1 for ts in timestamps if window_start <= ts <= window_end)
+    minutes = (window_end - window_start) / 60.0
+    return count / minutes if minutes > 0 else 0.0
 
 
 def wait_for_completions(prefix: str, expected: int, timeout_sec: int = 600) -> dict[str, int]:
@@ -300,7 +323,8 @@ def request_counts(since_epoch: float | None = None, batch_id: str | None = None
         "expired": expired,
         "queued": states.get("QUEUED", 0),
         "in_flight": states.get("IN_FLIGHT", 0),
-        "completion_rate_pct": round((completed / submitted * 100.0) if submitted else 0.0, 2),
+        "accounted_rate_pct": round((completed / submitted * 100.0) if submitted else 0.0, 2),
+        "success_rate_pct": round((succeeded / submitted * 100.0) if submitted else 0.0, 2),
     }
 
 
@@ -389,20 +413,19 @@ def scenario1() -> ScenarioResult:
     submitted = submit_load_duration("s1", "model-a", target_rate, duration_sec)
 
     states = wait_for_completions("s1-", submitted, timeout_sec=600)
-    completions = fetch_completions(start)
+    succeeded_completions = fetch_completions(start, states=("SUCCEEDED",), prefix="s1-")
+    all_completions = fetch_completions(start, prefix="s1-")
 
-    model_a = [(ts, tok) for ts, m, tok in completions if m == "model-a"]
-    rpm_timestamps = [ts for ts, _ in model_a]
-    tpm_events = model_a
+    model_a_succeeded = [(ts, tok) for ts, m, tok in succeeded_completions if m == "model-a"]
+    rpm_timestamps = [ts for ts, _ in model_a_succeeded]
+    tpm_events = model_a_succeeded
 
     max_rpm = max_in_sliding_window(rpm_timestamps, 60)
     max_tpm = max_tpm_sliding_window(tpm_events, 60)
 
-    # Per-minute buckets after warm-up (skip first 60s)
     warmup_end = start + 60
-    post_warmup = [ts for ts in rpm_timestamps if ts >= warmup_end]
-    buckets = rpm_per_minute([(ts, "model-a", 1000) for ts in post_warmup])
-    avg_rpm = (sum(buckets.values()) / max(len(buckets), 1)) if buckets else 0
+    load_end = start + duration_sec
+    avg_rpm = avg_rpm_in_window(rpm_timestamps, warmup_end, load_end)
 
     total_terminal = states.get("SUCCEEDED", 0) + states.get("FAILED", 0) + states.get("EXPIRED", 0)
     queued = states.get("QUEUED", 0) + states.get("IN_FLIGHT", 0)
@@ -411,7 +434,7 @@ def scenario1() -> ScenarioResult:
     passed = (
         max_rpm <= 50_000
         and max_tpm <= 100_000_000
-        and avg_rpm >= 45_000  # 90% of 50K RPM target
+        and avg_rpm >= 45_000
         and accounted >= submitted * 0.99
     )
 
@@ -422,11 +445,14 @@ def scenario1() -> ScenarioResult:
             "successful": states.get("SUCCEEDED", 0),
             "failed": states.get("FAILED", 0),
             "expired": states.get("EXPIRED", 0),
-            "completion_rate_pct": round((total_terminal / submitted * 100.0) if submitted else 0.0, 2),
+            "accounted_rate_pct": round((accounted / submitted * 100.0) if submitted else 0.0, 2),
+            "success_rate_pct": round(
+                (states.get("SUCCEEDED", 0) / submitted * 100.0) if submitted else 0.0, 2
+            ),
         },
-        "latency_ms": latency_percentiles_ms(since_epoch=start),
+        "latency_ms": latency_percentiles_ms(since_epoch=start, prefix="s1-"),
         "limits_per_model": observed_limits_per_model(
-            completions,
+            succeeded_completions,
             {"model-a": {"rpm": 50_000, "tpm": 100_000_000}},
         ),
         "submitted": submitted,
@@ -444,7 +470,8 @@ def scenario1() -> ScenarioResult:
         {
             "submitted": submitted,
             "completed": total_terminal,
-            "completion_rate_pct": details["summary"]["completion_rate_pct"],
+            "accounted_rate_pct": details["summary"]["accounted_rate_pct"],
+            "success_rate_pct": details["summary"]["success_rate_pct"],
             "max_rpm_60s": max_rpm,
             "max_tpm_60s": max_tpm,
             "avg_rpm_post_warmup": round(avg_rpm, 1),
@@ -489,10 +516,11 @@ def scenario2() -> ScenarioResult:
     log("waiting 120s for queue drain before measuring...")
     time.sleep(120)
 
-    completions = fetch_completions(start)
+    completions = fetch_completions(start, states=("SUCCEEDED", "FAILED", "EXPIRED"), prefix=f"{prefix}-")
+    succeeded_completions = fetch_completions(start, states=("SUCCEEDED",), prefix=f"{prefix}-")
 
     def analyze_model(model: str, rpm_limit: int, tpm_limit: int) -> dict:
-        events = [(ts, tok) for ts, m, tok in completions if m == model]
+        events = [(ts, tok) for ts, m, tok in succeeded_completions if m == model]
         ts_list = [ts for ts, _ in events]
         return {
             "max_rpm_60s": max_in_sliding_window(ts_list, 60),
@@ -509,11 +537,17 @@ def scenario2() -> ScenarioResult:
     # During throttle phase (45-90s from start), model-a should be <= 5K per minute
     throttle_start = start + 45
     throttle_end = start + 90
-    throttle_events = [ts for ts, m, _ in completions if m == "model-a" and throttle_start <= ts <= throttle_end]
+    throttle_events = [
+        ts for ts, m, _ in succeeded_completions
+        if m == "model-a" and throttle_start <= ts <= throttle_end
+    ]
     throttle_max_rpm = max_in_sliding_window(throttle_events, 60) if throttle_events else 0
 
     # Model B should still process during A throttle
-    b_during_throttle = [ts for ts, m, _ in completions if m == "model-b" and throttle_start <= ts <= throttle_end]
+    b_during_throttle = [
+        ts for ts, m, _ in succeeded_completions
+        if m == "model-b" and throttle_start <= ts <= throttle_end
+    ]
 
     passed = (
         a_stats["max_rpm_60s"] <= 30_000
@@ -529,7 +563,12 @@ def scenario2() -> ScenarioResult:
             "successful": a_stats["total_completed"] + b_stats["total_completed"],
             "failed": 0,
             "expired": 0,
-            "completion_rate_pct": round(
+            "accounted_rate_pct": round(
+                ((a_stats["total_completed"] + b_stats["total_completed"]) / (submitted_a + submitted_b) * 100.0)
+                if (submitted_a + submitted_b) else 0.0,
+                2,
+            ),
+            "success_rate_pct": round(
                 ((a_stats["total_completed"] + b_stats["total_completed"]) / (submitted_a + submitted_b) * 100.0)
                 if (submitted_a + submitted_b) else 0.0,
                 2,
@@ -537,7 +576,7 @@ def scenario2() -> ScenarioResult:
         },
         "latency_ms": latency_percentiles_ms(since_epoch=start, prefix=f"{prefix}-"),
         "limits_per_model": observed_limits_per_model(
-            completions,
+            succeeded_completions,
             {
                 "model-a": {"rpm": 30_000, "tpm": 60_000_000},
                 "model-b": {"rpm": 20_000, "tpm": 40_000_000},
@@ -640,7 +679,7 @@ def scenario3() -> ScenarioResult:
 
     last_callback = callback_data["received"][-1]["body"] if callback_data["received"] else {}
     counts = request_counts(batch_id=batch_id)
-    completions = fetch_completions(run_start)
+    completions = fetch_completions(run_start, states=("SUCCEEDED",), prefix=f"s3-{run_id}-req-")
     configured_limits = {
         "model-a": {"rpm": 50_000, "tpm": 100_000_000},
         "model-b": {"rpm": 50_000, "tpm": 100_000_000},
@@ -670,7 +709,8 @@ def scenario3() -> ScenarioResult:
             "successful": counts["successful"],
             "failed": counts["failed"],
             "expired": counts["expired"],
-            "completion_rate_pct": counts["completion_rate_pct"],
+            "accounted_rate_pct": counts["accounted_rate_pct"],
+            "success_rate_pct": counts["success_rate_pct"],
         },
         "latency_ms": latency_percentiles_ms(batch_id=batch_id),
         "limits_per_model": observed_limits_per_model(completions, configured_limits),
@@ -695,7 +735,7 @@ def scenario3() -> ScenarioResult:
             "batch_processing_ms": batch_processing_ms,
             "callback_after_batch_ms": callback_after_batch_ms,
             "callback_attempts": callback_data["count"],
-            "completion_rate_pct": counts["completion_rate_pct"],
+            "success_rate_pct": counts["success_rate_pct"],
             "latency_p50_ms": details["latency_ms"]["p50_ms"],
             "latency_p95_ms": details["latency_ms"]["p95_ms"],
         },

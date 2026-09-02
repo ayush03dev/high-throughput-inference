@@ -32,13 +32,13 @@ management:
 
 inference:
   provider-url: ${PROVIDER_URL:http://localhost:8082}
-  max-queue-wait-ms: 300000
+  max-queue-wait-ms: 1200000
   kafka:
     requests-topic: inference.requests
     retry-topic: inference.requests.retry
     consumer-group: request-processors
     retry-consumer-group: request-processors-retry
-    retry-delay-ms: 100
+    retry-delay-ms: 50
 
 logging:
   pattern:

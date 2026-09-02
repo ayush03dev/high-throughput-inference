@@ -66,21 +66,19 @@ chmod +x scripts/e2e-smoke.sh
 
 ```bash
 cd tools/loadgen && npm install
-node index.js --url http://localhost:8080 --rate 100 --duration 10 --models model-a:1.0 --tokens 1000
+node index.js --url http://localhost:8081 --rate 100 --duration 10 --models model-a:1.0 --tokens 1000
 ```
 
 ## Ports
 
 | Service | Port |
 |---------|------|
-| inference-gateway | 8080 |
-| request-processor | 8081 |
+| inference-gateway | 8081 |
 | provider-mock | 8082 |
-| webhook-delivery | 8083 |
 | webhook-mock | 9000 |
-| Postgres | 5432 |
-| Redis | 6379 |
-| Kafka | 9092 |
+| Postgres | 5433 |
+| Redis | 6380 |
+| Kafka | 9093 |
 
 ## Validation scenarios
 

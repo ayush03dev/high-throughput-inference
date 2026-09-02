@@ -19,7 +19,7 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-BASE_URL = "http://localhost:8080"
+BASE_URL = "http://localhost:8081"
 CALLBACK_URL = "http://webhook-mock:9000/callback"
 TOKENS_PER_REQUEST = 1000
 PG_CONTAINER = "high-throughput-inference-postgres-1"

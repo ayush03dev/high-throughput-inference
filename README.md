@@ -2,6 +2,34 @@
 
 Production-style inference gateway: **Java microservices + Kafka + PostgreSQL + Redis**, with **Node.js** load and webhook test tools. Single monorepo.
 
+## Validation & benchmark report
+
+**Start here for grading.** The assignment asks for three live validation scenarios and a benchmark write-up. This repo ships both:
+
+| Artifact | What it is |
+|----------|------------|
+| [`scenarios/validate.py`](scenarios/validate.py) | Automated driver for all three assignment scenarios against a running stack |
+| [`BENCHMARK.md`](BENCHMARK.md) | Append-only report of each validation run (PASS/FAIL, throughput, latency, per-model limits) |
+
+```bash
+# 1. Start the full stack (first run builds images)
+docker compose up --build
+
+# 2. In another terminal — run all three scenarios (~15–25 min)
+python3 scenarios/validate.py
+
+# Or a single scenario, e.g. async batch + callback
+python3 scenarios/validate.py 3
+```
+
+`validate.py` drives the live system via the HTTP API, `docker exec ... psql`, and admin endpoints. It prints progress to the console and **appends a dated section to `BENCHMARK.md`** at the repo root. Exit code is non-zero if any scenario fails.
+
+**What each scenario checks:**
+
+- **Scenario 1 — reach provider capacity**: model at 50,000 RPM / 100M TPM, >5 minutes of over-capacity load. Passes on ≥90% of allowed capacity post-warm-up, RPM/TPM within configured limits (0.1% tolerance on the 60s sliding window), and ≥99% of requests accounted for. Observed throughput is measured from each request's `admitted_at` (when the limiter admitted it), not `completed_at`, so queueing delay doesn't inflate the window counts. A residual overshoot of a few dozen requests (~0.02–0.03%, e.g. ~50,018 vs 50,000) can still appear from sub-second JVM/Redis clock skew — not from the limiter admitting extra traffic. See Design decisions for how validation handles that.
+- **Scenario 2 — different models, changing limits**: model-a (30k RPM/60M TPM) and model-b (20k RPM/40M TPM) run concurrently; model-a is throttled to 5,000 RPM mid-run and restored, with no restart. Passes if both models stay within their current limits throughout and the report shows configured vs. observed throughput over time.
+- **Scenario 3 — async batch completion**: 10,000 requests across two models with a callback URL; `provider-mock` is set to a 5% simulated failure rate for the duration of the batch (reset to 0% afterward) so some requests genuinely fail, and the first two callback delivery attempts are rejected (via `webhook-mock`'s `REJECT_ATTEMPTS`) to exercise retry. Passes on a <1s ack, a callback sent only after every request is terminal, successful delivery once the destination recovers, the callback summary matching `GET /v1/batches/{id}` on every field (total/succeeded/failed/expired/status, not just total), at least one genuinely failed request, and every request id appearing exactly once.
+
 ## Project layout
 
 ```
@@ -15,8 +43,9 @@ high-throughput-inference/
 ├── tools/
 │   ├── loadgen/             # load generator CLI
 │   └── webhook-mock/        # test webhook receiver (simulates client callback URL)
-├── scenarios/               # validation scripts (validate.py)
+├── scenarios/               # validation scripts (validate.py) — see above
 ├── scripts/                 # smoke tests, helpers
+├── BENCHMARK.md             # validation results (written by validate.py)
 ├── docker-compose.yml
 └── pom.xml                  # Maven parent (Java modules under services/)
 ```
@@ -56,15 +85,18 @@ Docker Compose builds and installs Node dependencies inside the `webhook-mock` i
 # Build and run full stack
 docker compose up --build
 
+# Assignment validation (stack must be running) — see "Validation & benchmark report" above
+python3 scenarios/validate.py
+
 # Run unit tests
 mvn clean test
 
-# E2E smoke test (stack must be running)
+# Quick smoke test (stack must be running)
 chmod +x scripts/e2e-smoke.sh
 ./scripts/e2e-smoke.sh
 ```
 
-All services expose Spring Boot Actuator health at `/actuator/health`.
+Java services expose Spring Boot Actuator health at `/actuator/health`; `webhook-mock` uses `/health`.
 
 ## API
 
@@ -131,25 +163,7 @@ node index.js --url http://localhost:8081 --rate 200 --duration 30 \
   --batch-size 50 --callback-url http://webhook-mock:9000/callback
 ```
 
-Dispatch is rate-paced and concurrency-bounded (`--concurrency`, default 256 in-flight HTTP calls) rather than one-request-at-a-time, so it can actually reach the configured `--rate`. At the end of a run it prints a JSON report with: submitted/acked/ack-failed counts, ack latency percentiles, per-model submitted RPM/TPM (max over any 60s window), and — unless `--no-track` is passed — completion/success/failure counts and end-to-end latency percentiles. In single-request mode at high rates, completion is tracked on a bounded random sample (`--track-sample`, default 3000 requests) rather than every request, to avoid the poller itself becoming the bottleneck; the report states the sample size/fraction. For an exact, full-population count use `scenarios/validate.py`, which reads Postgres directly.
-
-## Running the validation scenarios
-
-`scenarios/validate.py` drives the live stack (via the HTTP API, `docker exec ... psql`, and `PUT /v1/admin/models`) and implements the three scenarios from the assignment brief. It requires the stack to be up (`docker compose up --build`) and produces `BENCHMARK.md` at the repo root.
-
-```bash
-# all three scenarios
-python3 scenarios/validate.py
-
-# a single scenario, e.g. the async batch/callback one
-python3 scenarios/validate.py 3
-```
-
-- **Scenario 1 — reach provider capacity**: model at 50,000 RPM / 100M TPM, >5 minutes of over-capacity load. Passes on ≥90% of allowed capacity post-warm-up, RPM/TPM within configured limits (0.1% tolerance on the 60s sliding window), and ≥99% of requests accounted for. Observed throughput is measured from each request's `admitted_at` (when the limiter admitted it), not `completed_at`, so queueing delay doesn't inflate the window counts. A residual overshoot of a few dozen requests (~0.02–0.03%, e.g. ~50,018 vs 50,000) can still appear from sub-second JVM/Redis clock skew — not from the limiter admitting extra traffic. See Design decisions for how validation handles that.
-- **Scenario 2 — different models, changing limits**: model-a (30k RPM/60M TPM) and model-b (20k RPM/40M TPM) run concurrently; model-a is throttled to 5,000 RPM mid-run and restored, with no restart. Passes if both models stay within their current limits throughout and the report shows configured vs. observed throughput over time.
-- **Scenario 3 — async batch completion**: 10,000 requests across two models with a callback URL; `provider-mock` is set to a 5% simulated failure rate for the duration of the batch (reset to 0% afterward) so some requests genuinely fail, and the first two callback delivery attempts are rejected (via `webhook-mock`'s `REJECT_ATTEMPTS`) to exercise retry. Passes on a <1s ack, a callback sent only after every request is terminal, successful delivery once the destination recovers, the callback summary matching `GET /v1/batches/{id}` on every field (total/succeeded/failed/expired/status, not just total), at least one genuinely failed request, and every request id appearing exactly once.
-
-Exit code is non-zero if any scenario fails; check the console log and `BENCHMARK.md` for details.
+Dispatch is rate-paced and concurrency-bounded (`--concurrency`, default 256 in-flight HTTP calls) rather than one-request-at-a-time, so it can actually reach the configured `--rate`. At the end of a run it prints a JSON report with: submitted/acked/ack-failed counts, ack latency percentiles, per-model submitted RPM/TPM (max over any 60s window), and — unless `--no-track` is passed — completion/success/failure counts and end-to-end latency percentiles. In single-request mode at high rates, completion is tracked on a bounded random sample (`--track-sample`, default 3000 requests) rather than every request, to avoid the poller itself becoming the bottleneck; the report states the sample size/fraction. For assignment-grade validation with full-population accounting, use `scenarios/validate.py` (results in `BENCHMARK.md`).
 
 ## Ports
 

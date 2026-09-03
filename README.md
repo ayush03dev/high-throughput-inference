@@ -23,6 +23,9 @@ high-throughput-inference/
 
 ## Architecture
 
+<img width="1760" height="974" alt="image" src="https://github.com/user-attachments/assets/debecd54-138d-4fae-953f-17de5bf936f5" />
+
+
 - **inference-gateway** — accepts single/batch requests, persists them, publishes to Kafka, and exposes status/results/admin endpoints. Ack for a batch submission is returned before any request is processed (target: <1s).
 - **request-processor** — consumes from Kafka, checks the per-model RPM/TPM budget in Redis before calling the provider, and republishes a rate-limited request to a retry topic (bounded backoff, then `EXPIRED`) instead of blocking the consumer thread.
 - **provider-mock** — simulates an external LLM provider: configurable per-model latency and failure rate, runs on virtual threads so simulated latency doesn't exhaust the platform thread pool.
